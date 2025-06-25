@@ -49,11 +49,16 @@ async def fetch_ticker_and_candles(symbol, timeframe):
         # Ajustar período para download
         period = "7d" if yf_interval.endswith("m") else "60d"
 
-        df = yf.download(tickers=symbol, period=period, interval=yf_interval, progress=False)
+        df = yf.download(tickers=symbol, period=period, interval=yf_interval, progress=False, auto_adjust=False)
 
         if df.empty:
             st.error(f"Nenhum dado retornado para {symbol} no timeframe {timeframe}")
             return None, None
+
+        # Se MultiIndex, extrair apenas colunas do ticker
+        if isinstance(df.columns, pd.MultiIndex):
+            # Usar .xs para pegar só as colunas do ticker solicitado
+            df = df.xs(symbol, axis=1, level=1, drop_level=True)
 
         # Renomear colunas para minúsculas
         df = df.rename(columns={
