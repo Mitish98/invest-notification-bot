@@ -2,5 +2,6 @@ python-binance
 requests
 ta
 pandas==1.5.3
-streamlit==1.26.0
+streamlit>=1.30.0
+pillow>=9.6.0
 python-dotenv
