@@ -1,23 +1,18 @@
 import streamlit as st
 import asyncio
-from binance.client import Client
+import yfinance as yf
 import pandas as pd
-import requests
 from ta.momentum import RSIIndicator
 from dotenv import load_dotenv
 import os
+import requests
 
 # Carregar variáveis de ambiente do arquivo .env
 load_dotenv()
 
-# Importando credenciais
-api_key_spot = os.getenv("api_key_spot")
-api_secret_spot = os.getenv("api_secret_spot")
+# Importando credenciais do Telegram
 telegram_bot_token = os.getenv("telegram_bot_token")
 telegram_chat_id = os.getenv("telegram_chat_id")
-
-# Inicializando o cliente Binance
-client = Client(api_key_spot, api_secret_spot)
 
 # Funções auxiliares
 def calculate_bollinger_bands(df, num_periods=21, std_dev_factor=2):
@@ -35,23 +30,53 @@ def calculate_stochastic_oscillator(df, k_period=14, d_period=3):
     return df
 
 async def fetch_ticker_and_candles(symbol, timeframe):
-    try:
-        candles = client.get_klines(symbol=symbol, interval=timeframe, limit=50)
-        df = pd.DataFrame(candles, columns=['open_time', 'open', 'high', 'low', 'close', 'volume', 
-                                            'close_time', 'quote_asset_volume', 'number_of_trades', 
-                                            'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'])
-        
-        # Convertendo para os tipos corretos
-        df['open_time'] = pd.to_datetime(df['open_time'], unit='ms')
-        df['close_time'] = pd.to_datetime(df['close_time'], unit='ms')
-        df['open'] = df['open'].astype(float)
-        df['high'] = df['high'].astype(float)
-        df['low'] = df['low'].astype(float)
-        df['close'] = df['close'].astype(float)
-        df['volume'] = df['volume'].astype(float)
+    """
+    Busca dados OHLCV do Yahoo Finance via yfinance.
 
-        ticker = client.get_symbol_ticker(symbol=symbol)
-        current_price = float(ticker['price'])
+    symbol: string do ticker, ex: "BTC-USD"
+    timeframe: string do intervalo, ex: "1m", "5m", "1d"
+    """
+    try:
+        interval_map = {
+            "1m": "1m",
+            "5m": "5m",
+            "15m": "15m",
+            "1h": "60m",
+            "4h": "4h",
+            "1d": "1d",
+        }
+        yf_interval = interval_map.get(timeframe, "1d")
+
+        # Ajustar período para download
+        period = "7d" if yf_interval.endswith("m") else "60d"
+
+        df = yf.download(tickers=symbol, period=period, interval=yf_interval, progress=False)
+
+        if df.empty:
+            st.error(f"Nenhum dado retornado para {symbol} no timeframe {timeframe}")
+            return None, None
+
+        df = df.rename(columns={
+            "Open": "open",
+            "High": "high",
+            "Low": "low",
+            "Close": "close",
+            "Volume": "volume"
+        })
+
+        df = df.reset_index()
+
+        # Criar colunas open_time e close_time para manter compatibilidade
+        if 'Datetime' in df.columns:
+            df['open_time'] = df['Datetime']
+        elif 'Date' in df.columns:
+            df['open_time'] = df['Date']
+        else:
+            df['open_time'] = pd.to_datetime('now')
+
+        df['close_time'] = df['open_time']
+
+        current_price = df['close'].iloc[-1]
 
         return current_price, df
     except Exception as e:
@@ -67,11 +92,9 @@ async def send_telegram_message(message):
     except requests.exceptions.RequestException as e:
         st.error(f"Erro ao enviar mensagem para o Telegram: {e}")
 
-# Controle de notificações para evitar repetições
 last_notifications = {}
 
 async def notify_conditions(symbol, timeframes, notify_telegram, signal_choice):
-    """Envia notificações com controle de repetição."""
     while True:
         for timeframe in timeframes:
             current_price, df = await fetch_ticker_and_candles(symbol, timeframe)
@@ -90,33 +113,30 @@ async def notify_conditions(symbol, timeframes, notify_telegram, signal_choice):
             stochastic_k = df['%K'].iloc[-1]
             stochastic_d = df['%D'].iloc[-1]
             rsi = df['rsi'].iloc[-1]
-            volume_ma = df['volume'].rolling(window=21).mean().iloc[-1]  # Média móvel de volume
+            volume_ma = df['volume'].rolling(window=21).mean().iloc[-1]
 
-            # Novo critério: volume > 100% acima da média (2x a média)
             high_volume = df['volume'].iloc[-1] > 3 * volume_ma
 
-            # Determinar sinal atual
             current_signal = None
             if (
-                current_price < lower_band and 
-                stochastic_k < 20 and 
-                stochastic_d < 20 and 
-                high_volume and 
+                current_price < lower_band and
+                stochastic_k < 20 and
+                stochastic_d < 20 and
+                high_volume and
                 rsi < 30 and
                 signal_choice in ["Compra", "Ambos"]
             ):
                 current_signal = "COMPRA"
             elif (
-                current_price > upper_band and 
-                stochastic_k > 80 and 
-                stochastic_d > 80 and 
-                high_volume and 
+                current_price > upper_band and
+                stochastic_k > 80 and
+                stochastic_d > 80 and
+                high_volume and
                 rsi > 70 and
                 signal_choice in ["Venda", "Ambos"]
             ):
                 current_signal = "VENDA"
 
-            # Evitar notificações repetidas
             key = f"{symbol}_{timeframe}"
             last_signal = last_notifications.get(key)
 
@@ -136,10 +156,12 @@ async def notify_conditions(symbol, timeframes, notify_telegram, signal_choice):
 st.title("Robô de Notificação para Criptomoedas")
 st.write("O sistema utiliza uma combinação de indicadores técnicos para gerar sinais de compra e venda.")
 
-# Entrada do usuário
-all_symbols = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "DOTUSDT", "DOGEUSDT", "FTMUSDT", "ASTRUSDT", "XRPUSDT", "SOLUSDT", 
-               "LTCUSDT", "PENDLEUSDT", "AAVEUSDT", "ORDIUSDT", "UNIUSDT", "LINKUSDT", 
-               "ENSUSDT", "MOVRUSDT", "ARBUSDT", "TRBUSDT", "MANTAUSDT", "AVAXUSDT", "ADAUSDT", "GALAUSDT","LDOUSDT"]
+# Adaptar símbolos para Yahoo Finance (exemplo: BTCUSDT -> BTC-USD)
+all_symbols = [
+    "BTC-USD", "ETH-USD", "BNB-USD", "DOT-USD", "DOGE-USD", "FTM-USD", "ASTR-USD", "XRP-USD", "SOL-USD",
+    "LTC-USD", "PENDLE-USD", "AAVE-USD", "ORDI-USD", "UNI-USD", "LINK-USD",
+    "ENS-USD", "MOVR-USD", "ARB-USD", "TRB-USD", "MANTA-USD", "AVAX-USD", "ADA-USD", "GALA-USD", "LDO-USD"
+]
 
 select_all = st.sidebar.checkbox("Selecionar todos os pares")
 symbols = st.sidebar.multiselect("Selecione os pares de moedas", all_symbols, default=all_symbols if select_all else [])
