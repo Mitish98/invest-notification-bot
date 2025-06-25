@@ -3,6 +3,8 @@ import asyncio
 from binance.client import Client
 import pandas as pd
 import requests
+import time
+import datetime
 from ta.momentum import RSIIndicator
 from dotenv import load_dotenv
 import os
@@ -16,10 +18,29 @@ api_secret_spot = os.getenv("api_secret_spot")
 telegram_bot_token = os.getenv("telegram_bot_token")
 telegram_chat_id = os.getenv("telegram_chat_id")
 
+# Verificar se as credenciais foram carregadas corretamente
+if not api_key_spot or not api_secret_spot:
+    st.error("As credenciais da API não foram carregadas corretamente. Verifique o arquivo .env.")
+if not telegram_bot_token or not telegram_chat_id:
+    st.warning("As credenciais do Telegram não foram carregadas. As notificações não funcionarão.")
+
 # Inicializando o cliente Binance
 client = Client(api_key_spot, api_secret_spot)
 
 # Funções auxiliares
+def sync_time():
+    try:
+        url = 'https://fapi.binance.com/fapi/v1/time'
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        server_time = response.json()['serverTime']
+        local_time = int(time.time() * 1000)
+        time_difference = server_time - local_time
+        return time_difference
+    except requests.exceptions.RequestException as e:
+        st.error(f"Erro ao sincronizar o tempo: {e}")
+        return 0
+
 def calculate_bollinger_bands(df, num_periods=21, std_dev_factor=2):
     df['SMA'] = df['close'].rolling(window=num_periods).mean()
     df['std_dev'] = df['close'].rolling(window=num_periods).std()
@@ -36,6 +57,7 @@ def calculate_stochastic_oscillator(df, k_period=14, d_period=3):
 
 async def fetch_ticker_and_candles(symbol, timeframe):
     try:
+        # Obtendo dados de candles
         candles = client.get_klines(symbol=symbol, interval=timeframe, limit=50)
         df = pd.DataFrame(candles, columns=['open_time', 'open', 'high', 'low', 'close', 'volume', 
                                             'close_time', 'quote_asset_volume', 'number_of_trades', 
@@ -50,6 +72,7 @@ async def fetch_ticker_and_candles(symbol, timeframe):
         df['close'] = df['close'].astype(float)
         df['volume'] = df['volume'].astype(float)
 
+        # Obtendo o preço atual
         ticker = client.get_symbol_ticker(symbol=symbol)
         current_price = float(ticker['price'])
 
@@ -60,23 +83,23 @@ async def fetch_ticker_and_candles(symbol, timeframe):
 
 async def send_telegram_message(message):
     url = f"https://api.telegram.org/bot{telegram_bot_token}/sendMessage"
-    payload = {"chat_id": telegram_chat_id, "text": message}
+    payload = {
+        "chat_id": telegram_chat_id,
+        "text": message
+    }
     try:
         response = requests.post(url, json=payload)
         response.raise_for_status()
     except requests.exceptions.RequestException as e:
         st.error(f"Erro ao enviar mensagem para o Telegram: {e}")
 
-# Controle de notificações para evitar repetições
-last_notifications = {}
-
-async def notify_conditions(symbol, timeframes, notify_telegram, signal_choice):
-    """Envia notificações com controle de repetição."""
-    while True:
+async def notify_conditions(symbol, timeframes, notify_telegram):
+    """Envia notificações continuamente com base nas condições técnicas para múltiplos timeframes."""
+    while True:  # Loop infinito
         for timeframe in timeframes:
             current_price, df = await fetch_ticker_and_candles(symbol, timeframe)
             if df is None:
-                await asyncio.sleep(5)
+                await asyncio.sleep(5)  # Espera 5 segundos antes de tentar novamente
                 continue
 
             # Indicadores
@@ -90,47 +113,23 @@ async def notify_conditions(symbol, timeframes, notify_telegram, signal_choice):
             stochastic_k = df['%K'].iloc[-1]
             stochastic_d = df['%D'].iloc[-1]
             rsi = df['rsi'].iloc[-1]
-            volume_ma = df['volume'].rolling(window=21).mean().iloc[-1]  # Média móvel de volume
+            volume_ma = df['volume'].rolling(window=21).mean().iloc[-1]
 
-            # Novo critério: volume > 100% acima da média (2x a média)
-            high_volume = df['volume'].iloc[-1] > 3 * volume_ma
-
-            # Determinar sinal atual
-            current_signal = None
-            if (
-                current_price < lower_band and 
-                stochastic_k < 20 and 
-                stochastic_d < 20 and 
-                high_volume and 
-                rsi < 30 and
-                signal_choice in ["Compra", "Ambos"]
-            ):
-                current_signal = "COMPRA"
-            elif (
-                current_price > upper_band and 
-                stochastic_k > 80 and 
-                stochastic_d > 80 and 
-                high_volume and 
-                rsi > 70 and
-                signal_choice in ["Venda", "Ambos"]
-            ):
-                current_signal = "VENDA"
-
-            # Evitar notificações repetidas
-            key = f"{symbol}_{timeframe}"
-            last_signal = last_notifications.get(key)
-
-            if current_signal and current_signal != last_signal:
-                message = (
-                    f"Sinal de {current_signal} para {symbol} no timeframe {timeframe}:\n"
-                    f"Preço atual: {current_price}\n"
-                )
+            # Condições de compra
+            if current_price < lower_band and stochastic_k < 20 and stochastic_d < 20 and df['volume'].iloc[-1] > volume_ma and rsi < 30:
+                message = f"Sinal de COMPRA para {symbol} no timeframe {timeframe}: Preço atual: {current_price}"
                 st.info(message)
                 if notify_telegram:
                     await send_telegram_message(message)
-                last_notifications[key] = current_signal
 
-            await asyncio.sleep(60)
+            # Condições de venda
+            if current_price > upper_band and stochastic_k > 80 and stochastic_d > 80 and df['volume'].iloc[-1] > volume_ma and rsi > 70:
+                message = f"Sinal de VENDA para {symbol} no timeframe {timeframe}: Preço atual: {current_price}"
+                st.info(message)
+                if notify_telegram:
+                    await send_telegram_message(message)
+
+            await asyncio.sleep(60)  # Aguarda 60 segundos antes de verificar novamente
 
 # Configuração do Streamlit
 st.title("Robô de Notificação para Criptomoedas")
@@ -139,13 +138,12 @@ st.write("O sistema utiliza uma combinação de indicadores técnicos para gerar
 # Entrada do usuário
 all_symbols = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "DOTUSDT", "DOGEUSDT", "FTMUSDT", "ASTRUSDT", "XRPUSDT", "SOLUSDT", 
                "LTCUSDT", "PENDLEUSDT", "AAVEUSDT", "ORDIUSDT", "UNIUSDT", "LINKUSDT", 
-               "ENSUSDT", "MOVRUSDT", "ARBUSDT", "TRBUSDT", "MANTAUSDT", "AVAXUSDT", "ADAUSDT", "GALAUSDT","LDOUSDT"]
+               "ENSUSDT", "MOVRUSDT", "ARBUSDT", "TRBUSDT", "MANTAUSDT", "AVAXUSDT", "NEIROUSDT","ADAUSDT","GALAUSDT"]
 
 select_all = st.sidebar.checkbox("Selecionar todos os pares")
 symbols = st.sidebar.multiselect("Selecione os pares de moedas", all_symbols, default=all_symbols if select_all else [])
 timeframes = st.sidebar.multiselect("Selecione o(s) timeframe(s)", ["1m", "5m", "15m", "1h", "4h", "1d"])
 notify_telegram = st.sidebar.checkbox("Enviar notificações no Telegram", value=False)
-signal_choice = st.sidebar.radio("Selecione os sinais desejados", ["Compra", "Venda", "Ambos"], index=2)
 
 if st.sidebar.button("Iniciar Monitoramento"):
     if not symbols:
@@ -153,12 +151,8 @@ if st.sidebar.button("Iniciar Monitoramento"):
     elif not timeframes:
         st.error("Por favor, selecione pelo menos um timeframe.")
     else:
-        if notify_telegram:
-            st.success("Monitoramento iniciado com notificações no Telegram! Acompanhe os alertas abaixo.")
-        else:
-            st.warning("Monitoramento iniciado sem notificações no Telegram. Apenas os alertas locais serão exibidos.")
-
+        st.success("Monitoramento iniciado! Acompanhe os alertas abaixo.")
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        tasks = [notify_conditions(symbol, timeframes, notify_telegram, signal_choice) for symbol in symbols]
+        tasks = [notify_conditions(symbol, timeframes, notify_telegram) for symbol in symbols]
         loop.run_until_complete(asyncio.gather(*tasks))
