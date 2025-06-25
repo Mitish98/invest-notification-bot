@@ -32,7 +32,6 @@ def calculate_stochastic_oscillator(df, k_period=14, d_period=3):
 async def fetch_ticker_and_candles(symbol, timeframe):
     """
     Busca dados OHLCV do Yahoo Finance via yfinance.
-
     symbol: string do ticker, ex: "BTC-USD"
     timeframe: string do intervalo, ex: "1m", "5m", "1d"
     """
@@ -56,6 +55,7 @@ async def fetch_ticker_and_candles(symbol, timeframe):
             st.error(f"Nenhum dado retornado para {symbol} no timeframe {timeframe}")
             return None, None
 
+        # Renomear colunas para minúsculas
         df = df.rename(columns={
             "Open": "open",
             "High": "high",
@@ -66,7 +66,7 @@ async def fetch_ticker_and_candles(symbol, timeframe):
 
         df = df.reset_index()
 
-        # Criar colunas open_time e close_time para manter compatibilidade
+        # Criar colunas open_time e close_time para manter compatibilidade com lógica anterior
         if 'Datetime' in df.columns:
             df['open_time'] = df['Datetime']
         elif 'Date' in df.columns:
@@ -102,7 +102,7 @@ async def notify_conditions(symbol, timeframes, notify_telegram, signal_choice):
                 await asyncio.sleep(5)
                 continue
 
-            # Indicadores
+            # Indicadores técnicos
             df = calculate_bollinger_bands(df)
             df = calculate_stochastic_oscillator(df)
             rsi_indicator = RSIIndicator(df['close'], window=14)
